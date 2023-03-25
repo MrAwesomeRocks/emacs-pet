@@ -90,7 +90,7 @@ program by adjusting `pet-yaml-to-json-program-arguments'"
                  (const "yq")
                  (string :tag "Other")))
 
-(defcustom pet-yaml-to-json-program-arguments '("select" "-f" "-" "-p" "yaml" "-w" "json")
+(defcustom pet-yaml-to-json-program-arguments '("-f" "-" "-r" "yaml" "-w" "json")
   "Arguments for `pet-yaml-to-json-program'."
   :group 'pet
   :type '(repeat string))
@@ -113,7 +113,12 @@ and nil otherwise."
 
 (defun pet-system-bin-dir ()
   "Determine the correct script directory based on `system-type'."
-  (if (eq system-type 'windows-nt) "Scripts" "bin"))
+  (if (eq (if (file-remote-p default-directory)
+              (tramp-get-connection-property (tramp-dissect-file-name default-directory)
+                                             "uname" 'windows-nt)
+            system-type)
+          'windows-nt)
+      "Scripts" "bin"))
 
 (defun pet-report-error (err)
   "Report ERR to the minibuffer.
@@ -226,7 +231,7 @@ otherwise."
               (let ((exit-code
                      (when (or toml-p yaml-p)
                        (condition-case err
-                           (apply #'call-process
+                           (apply #'process-file
                                   (cond (toml-p pet-toml-to-json-program)
                                         (yaml-p pet-yaml-to-json-program))
                                   file-path
@@ -373,19 +378,19 @@ This variable is an alist where the key is the absolute path to a
 
 Returns the path to the `pre-commit' executable."
   (and (pet-pre-commit-config)
-       (or (executable-find "pre-commit")
+       (or (executable-find "pre-commit" t)
            (and (when-let* ((venv (pet-virtualenv-root))
                             (exec-path (list (concat (file-name-as-directory venv) (pet-system-bin-dir)))))
-                  (executable-find "pre-commit"))))))
+                  (executable-find "pre-commit" t))))))
 
 (defun pet-use-conda-p ()
   "Whether the current project is using `conda'.
 
 Returns the path to the `conda' variant found executable."
   (and (pet-environment)
-       (or (executable-find "conda")
-           (executable-find "mamba")
-           (executable-find "micromamba"))))
+       (or (executable-find "conda" t)
+           (executable-find "mamba" t)
+           (executable-find "micromamba" t))))
 
 (defun pet-use-poetry-p ()
   "Whether the current project is using `poetry'.
@@ -396,21 +401,21 @@ Returns the path to the `poetry' executable."
         (or (let-alist (pet-pyproject)
               .build-system.build-backend)
             ""))
-       (executable-find "poetry")))
+       (executable-find "poetry" t)))
 
 (defun pet-use-pyenv-p ()
   "Whether the current project is using `pyenv'.
 
 Returns the path to the `pyenv' executable."
   (and (pet-python-version)
-       (executable-find "pyenv")))
+       (executable-find "pyenv" t)))
 
 (defun pet-use-pipenv-p ()
   "Whether the current project is using `pipenv'.
 
 Returns the path to the `pipenv' executable."
   (and (pet-pipfile)
-       (executable-find "pipenv")))
+       (executable-find "pipenv" t)))
 
 (defun pet-pre-commit-config-has-hook-p (id)
   "Determine if the `pre-commit' configuration has a hook.
@@ -427,7 +432,7 @@ project has hook ID set up."
 Parse the pre-commit SQLite database located at DB-FILE to JSON."
   (condition-case err
       (with-temp-buffer
-        (call-process "sqlite3" nil t nil "-json" db-file "select * from repos")
+        (process-file "sqlite3" nil t nil "-json" db-file "select * from repos")
         (pet-parse-json (buffer-string)))
     (error (pet-report-error err))))
 
@@ -519,13 +524,15 @@ use it."
                  (user-error "`pre-commit' is configured but `%s' is not found in %s" executable bin-dir)))
            (error (pet-report-error err))))
         ((when-let* ((venv (pet-virtualenv-root))
-                     (exec-path (list (concat (file-name-as-directory venv) (pet-system-bin-dir)))))
-           (executable-find executable)))
-        ((executable-find "pyenv")
+                     (path (list (concat (file-name-as-directory venv) (pet-system-bin-dir))))
+                     (exec-path path)
+                     (tramp-remote-path path))
+           (executable-find executable t)))
+        ((executable-find "pyenv" t)
          (condition-case err
              (car (process-lines "pyenv" "which" executable))
            (error (pet-report-error err))))
-        (t (executable-find executable))))
+        (t (executable-find executable t))))
 
 (defvar pet-project-virtualenv-cache nil)
 
@@ -551,7 +558,7 @@ Selects a virtualenv in the follow order:
                                  (default-directory (file-name-directory (pet-environment-path))))
                         (condition-case err
                             (with-temp-buffer
-                              (let ((exit-code (call-process program nil t nil "info" "--envs" "--json"))
+                              (let ((exit-code (process-file program nil t nil "info" "--envs" "--json"))
                                     (output (string-trim (buffer-string))))
                                 (if (zerop exit-code)
                                     (let* ((prefix (alist-get 'prefix (pet-environment)))
@@ -564,7 +571,7 @@ Selects a virtualenv in the follow order:
                                  (default-directory (file-name-directory (pet-pyproject-path))))
                         (condition-case err
                             (with-temp-buffer
-                              (let ((exit-code (call-process program nil t nil "env" "info" "--no-ansi" "--path"))
+                              (let ((exit-code (process-file program nil t nil "env" "info" "--no-ansi" "--path"))
                                     (output (string-trim (buffer-string))))
                                 (if (zerop exit-code)
                                     output
@@ -574,7 +581,7 @@ Selects a virtualenv in the follow order:
                                  (default-directory (file-name-directory (pet-pipfile-path))))
                         (condition-case err
                             (with-temp-buffer
-                              (let ((exit-code (call-process program nil t nil "--venv"))
+                              (let ((exit-code (process-file program nil t nil "--venv"))
                                     (output (string-trim (buffer-string))))
                                 (if (zerop exit-code)
                                     output
@@ -589,7 +596,7 @@ Selects a virtualenv in the follow order:
                                  (default-directory (file-name-directory (pet-python-version-path))))
                         (condition-case err
                             (with-temp-buffer
-                              (let ((exit-code (call-process program nil t nil "prefix"))
+                              (let ((exit-code (process-file program nil t nil "prefix"))
                                     (output (string-trim (buffer-string))))
                                 (if (zerop exit-code)
                                     (file-truename output)
